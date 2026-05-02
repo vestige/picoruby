@@ -1,152 +1,153 @@
-# CYW43 AP Follow-up Design Notes
+# CYW43 AP Roadmap Toward `pcw_timer.py`
 
-## Context
+## Goal
 
-PR #400 adds the minimal Ruby API needed to toggle CYW43 AP mode:
+The long-term goal is to make a PicoRuby implementation practical for the same class of application as [`pcw_timer.py`](https://github.com/vestige/ptc/blob/main/pcw_timer.py):
+
+- the board starts a Wi-Fi AP
+- the AP has a known reachable IP
+- a browser can connect to an HTTP server running on the board
+- Ruby can implement the timer application logic on top
+
+The goal is not to clone the entire MicroPython `network.WLAN(network.AP_IF)` API in one step.
+The goal is to reach the same practical use case through small, reviewable PRs.
+
+## Where We Are Now
+
+### Step 1: minimal AP on/off
+
+Draft PR #400 adds the minimal Ruby API needed to toggle CYW43 AP mode:
 
 - `CYW43.enable_ap_mode(ssid, password, auth = CYW43::Auth::WPA2_AES_PSK)`
 - `CYW43.disable_ap_mode`
 
-That first step is intentionally small. It proves that PicoRuby can make a Pico W / Pico 2 W advertise an SSID from Ruby without introducing a larger wrapper yet.
-
-## What We Observed
-
-Manual check on Pico 2 W:
+Manual check on Pico 2 W confirmed:
 
 - `CYW43.init("JP")` succeeded
 - `CYW43.enable_ap_mode("PICO-TIMER", "12345678")` made the SSID visible from a smartphone
 - `CYW43.disable_ap_mode` made the SSID disappear
 
+This proves that PicoRuby can make Pico W / Pico 2 W advertise an SSID from Ruby.
+
 Observed limitation:
 
-- a client could see the SSID and attempt to connect, but usable connectivity was not confirmed
+- a client could see the SSID and attempt to connect, but practical network use was not yet confirmed
 
-At the moment PicoRuby does not expose enough AP-side state to tell whether the remaining issue is:
+### Step 2: AP-side IPv4 observability
 
-- association/auth timing
-- AP-side IPv4 visibility
-- DHCP behavior
-- client-side retry / captive portal behavior
+The next small PR adds AP-side IPv4 getters:
 
-## Important SDK Detail
+- `CYW43.ap_ipv4_address`
+- `CYW43.ap_ipv4_netmask`
+- `CYW43.ap_ipv4_gateway`
 
-The Pico SDK already appears to do more for AP mode than PicoRuby currently exposes.
+It also updates:
 
-Relevant files:
+- `ifconfig` to show separate `Station` and `Access Point` sections
+- the AP sample to print the AP-side IP
+- README and signatures
 
-- `src/rp2_common/pico_cyw43_arch/cyw43_arch.c`
-- `lib/cyw43-driver/src/cyw43_lwip.c`
-- `lib/cyw43-driver/src/cyw43_config.h`
+Implementation note:
 
-Notable behavior in the SDK:
+- the internal IPv4 helpers now read from `CYW43_ITF_STA` and `CYW43_ITF_AP` explicitly
+- AP-side getters return `nil` when the AP interface is not active, so stale values are not exposed after `disable_ap_mode`
 
-- `cyw43_arch_enable_ap_mode(...)` brings up `CYW43_ITF_AP`
-- the CYW43 lwIP integration assigns default AP-side IPv4 settings
-- the default AP address is `192.168.4.1`
-- the default AP netmask is `255.255.255.0`
-- the CYW43 lwIP layer calls `dhcp_server_init(...)` for the AP interface
+This step does not try to change AP behavior.
+It only makes AP-side network state observable from Ruby.
 
-This suggests that the next PicoRuby step should not start by reimplementing DHCP or inventing a high-level wrapper. The better next step is to expose enough AP-side observability to confirm what the SDK is already doing at runtime.
+## Why Step 2 Matters
 
-## Goal Of The Next PR
+`pcw_timer.py` relies on the equivalent of `ap.ifconfig()[0]` before it starts its HTTP server.
 
-Make AP-side network state observable from Ruby.
+Without AP-side observability, it is hard to answer:
 
-This should help answer:
+- what IP the AP is using
+- whether the AP-side interface is still up
+- whether a client is failing because of Ruby code, AP config, or DHCP/connectivity behavior
 
-- what AP IPv4 address is active after `enable_ap_mode`
-- whether the AP interface is really up
-- whether PicoRuby can bind a TCP server on the AP side and serve a page
+AP-side IPv4 getters are therefore a good bridge between:
 
-This is the minimum needed to move toward a PicoRuby version of `pcw_timer.py` without jumping straight to a large API surface.
+- "SSID is visible"
+- "an HTTP app is reachable through the AP"
 
-## Recommended Scope For The Next PR
+## Recommended Sequence From Here
 
-Recommended theme:
+### Keep the AP-side IPv4 getters PR small
 
-- expose AP-side status and IPv4 information
-- update examples and docs to print AP-side network info
-- do not add a MicroPython-style wrapper yet
+Do not expand the current observability PR into a larger networking PR.
 
-Recommended Ruby API additions:
+Reasons:
 
-- `CYW43.ap_ipv4_address -> String?`
-- `CYW43.ap_ipv4_netmask -> String?`
-- `CYW43.ap_ipv4_gateway -> String?`
+- it is already a coherent unit
+- it gives a concrete hardware-checkable improvement
+- adding policy/configuration changes now would make scope expand quickly
 
-Optional if implementation cost stays small:
+### Next small PR: experimental AP HTTP sample
 
-- `CYW43.ap_active? -> bool`
+After the IPv4 getter PR, the next small PR should be an experimental AP + HTTP sample.
 
-Recommended shell/doc follow-up:
+Recommended scope:
 
-- update `ifconfig` to show AP-side information when AP mode is enabled
-- add a tiny AP status sample that prints the AP address after `enable_ap_mode`
+- use `CYW43.enable_ap_mode`
+- print `CYW43.ap_ipv4_address`
+- start a tiny `TCPServer` on the board
+- return a minimal HTTP response such as `Hello from PicoRuby AP mode`
+- clearly document that the sample is experimental and intended for hardware confirmation
 
-## Why This Should Be Separate
+Recommended non-goals for that PR:
 
-This keeps the next PR focused on inspection rather than policy.
+- no new CYW43 core API if it is not required
+- no `network.WLAN(network.AP_IF)` wrapper
+- no DHCP server reimplementation
+- no AP-side custom IP setters
+- no timer UI yet
 
-It avoids mixing together:
+Why this is the right next step:
 
-- AP enable/disable
-- AP observability
-- AP configuration
-- DHCP behavior changes
-- HTTP application logic
+- it is still small
+- it is easy to try on hardware
+- it directly tests whether PicoRuby can move from "AP is visible" to "HTTP is reachable"
 
-That separation should make it easier to review and easier to debug on hardware.
+## What To Decide After The Experimental HTTP Sample
 
-## Suggested Implementation Shape
+The experimental AP HTTP sample should tell us which direction is needed next.
 
-Internally, PicoRuby should stop assuming that IPv4 helpers are STA-only.
+### If the sample works with the SDK defaults
 
-Instead of only exposing:
+Then the next follow-up can stay small and ergonomic:
 
-- `CYW43.ipv4_address`
-- `CYW43.ipv4_netmask`
-- `CYW43.ipv4_gateway`
+- add AP status helpers if useful
+- improve `ifconfig`
+- consider a lightweight higher-level AP helper
+- start porting the timer application in Ruby
 
-add internal helpers that accept a CYW43 interface id:
+### If the sample does not work reliably
 
-- `CYW43_ITF_STA`
-- `CYW43_ITF_AP`
+Then the next follow-up should focus on missing AP-side control:
 
-Then keep the current STA-oriented API stable while adding AP-specific entry points on top.
+- AP status APIs
+- AP-side `ifconfig`-like configuration
+- DHCP/IP behavior investigation
+- only then decide whether explicit DHCP control is needed
 
-This preserves backward compatibility and avoids changing the meaning of existing methods.
+## Explicit Non-Goals For Now
 
-## Explicit Non-Goals For The Next PR
+These should stay out of the current AP-side IPv4 getter PR:
 
-Do not include these in the next PR unless a runtime blocker forces it:
-
-- AP-side custom IP/netmask/gateway setters
+- full MicroPython `network.WLAN(network.AP_IF)` compatibility
+- AP-side channel configuration
+- connected client listing
 - DHCP server reimplementation
-- client list / station enumeration
-- AP channel configuration
-- `network.WLAN(network.AP_IF)` compatibility layer
 - full `pcw_timer.py` port
 
-## Likely PR After That
+Each of those can be revisited later if hardware testing shows they are necessary.
 
-Once AP-side observability exists, the next follow-up can be chosen based on what hardware testing shows.
+## Summary
 
-Two likely directions:
+The agreed path is:
 
-1. If SDK default AP IP + DHCP already works:
-   add a minimal AP + `TCPServer` HTTP sample
+1. keep the current AP-side IPv4 getters PR small
+2. add a separate experimental AP HTTP sample PR
+3. use that hardware result to choose whether the next work should be AP status, `ifconfig`/IP control, or DHCP-related support
 
-2. If SDK default AP IP + DHCP is not sufficient in PicoRuby:
-   add explicit AP-side IP configuration and any missing DHCP control
-
-## Why This Matters For `pcw_timer.py`
-
-`pcw_timer.py` needs more than just SSID broadcast.
-
-It assumes:
-
-- a client can join the AP
-- the Pico has a reachable AP-side IP
-- a browser can connect to an HTTP server running on the board
-
-The current AP on/off API is a good first milestone, but the next milestone should be proving AP-side network visibility from Ruby before adding the application layer.
+This sequence keeps review scope small while still ensuring that every step can be exercised on real Pico hardware.
